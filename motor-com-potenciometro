@@ -1,5 +1,5 @@
-int pinoMotorHorario = 6;
-int pinoMotorAnti = 5;
+int pinoMotorHorario = 5;
+int pinoMotorAnti = 6;
 int pinoBotao = 4;
 int pinoPot = 3;
 
@@ -17,43 +17,66 @@ void loop() {
   int valor_lido = analogRead(pinoPot);
   int velocidade = map(valor_lido,0,4096,0,255);
   int botao = digitalRead(pinoBotao);
+  Serial.println(velocidade);
   switch(estado){
     case 0:
     analogWrite(pinoMotorHorario, velocidade);
     analogWrite(pinoMotorAnti, 0);
-    Serial.println(velocidade);
       if(botao == 0){
-        analogWrite(pinoMotorHorario, 0);
-        analogWrite(pinoMotorAnti, 0);
         Serial.println("case 0");
         estado = 1;
-        delay(100);
+        delay(500);
         
       }
       break;
     case 1:
+        Serial.println("case 1");
       if(botao == 1){
         estado = 2;
-        Serial.println("case 1");
-        delay(100);
+        delay(500);
       }
       break;
     case 2:
-     if(botao == 0){
         analogWrite(pinoMotorHorario, 0);
-        analogWrite(pinoMotorAnti, velocidade);
+        analogWrite(pinoMotorAnti, 0);
         Serial.println("case 2");
+     if(botao == 0){
         estado = 3;
-        delay(100);
+        delay(500);
       }
       break;
     case 3:
+      Serial.println("case 3");
       if(botao == 1){
-        estado = 0;
-        Serial.println("case 3");
-        delay(100);
+        estado = 4;
+        delay(500);
       }
       break;
+    case 4:
+      analogWrite(pinoMotorHorario, 0);
+      analogWrite(pinoMotorAnti, velocidade);
+      Serial.println("case 4");
+      if (botao == 0){
+        estado = 5;
+        delay(500);
+      }
+      break;
+    case 5:
+      analogWrite(pinoMotorHorario, 0);
+      analogWrite(pinoMotorAnti, 0);
+      Serial.println("case 5");
+      if (botao == 1){
+        estado = 6;
+        delay(500);
+      }
+      break;
+    case 6:
+    Serial.println("case 6");
+    if(botao == 0){
+      estado = 0;
+      delay(500);
+    }
+    break;
   }
 
 }
