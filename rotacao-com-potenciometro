@@ -1,0 +1,59 @@
+int pinoMotorHorario = 6;
+int pinoMotorAnti = 5;
+int pinoBotao = 4;
+int pinoPot = 3;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(pinoMotorHorario, OUTPUT);
+  pinMode(pinoMotorAnti, OUTPUT);
+  pinMode(pinoBotao, INPUT_PULLUP);
+  pinMode(pinoPot, INPUT);
+  
+}
+int estado = 0;
+
+void loop() {
+  int valor_lido = analogRead(pinoPot);
+  int velocidade = map(valor_lido,0,4096,0,255);
+  int botao = digitalRead(pinoBotao);
+  switch(estado){
+    case 0:
+    analogWrite(pinoMotorHorario, velocidade);
+    analogWrite(pinoMotorAnti, 0);
+    Serial.println(velocidade);
+      if(botao == 0){
+        analogWrite(pinoMotorHorario, 0);
+        analogWrite(pinoMotorAnti, 0);
+        Serial.println("case 0");
+        estado = 1;
+        delay(100);
+        
+      }
+      break;
+    case 1:
+      if(botao == 1){
+        estado = 2;
+        Serial.println("case 1");
+        delay(100);
+      }
+      break;
+    case 2:
+     if(botao == 0){
+        analogWrite(pinoMotorHorario, 0);
+        analogWrite(pinoMotorAnti, velocidade);
+        Serial.println("case 2");
+        estado = 3;
+        delay(100);
+      }
+      break;
+    case 3:
+      if(botao == 1){
+        estado = 0;
+        Serial.println("case 3");
+        delay(100);
+      }
+      break;
+  }
+
+}
