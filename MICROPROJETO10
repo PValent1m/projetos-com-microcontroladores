@@ -1,0 +1,294 @@
+// BATALHA NAVAL - ESP32-C3 + BLE (Bluetooth Low Energy)  -  versao texto puro
+// Um ESP32 e o HOST (BLE server, espera) e o outro e o CLIENTE (BLE client, procura e conecta).
+// Protocolo (texto, cada mensagem termina com \n):
+//   READY | TIRO:E6 | RESP:AGUA / ACERTO / AFUNDOU / FIM
+//
+// Obs: no ESP32-C3, ative Ferramentas -> "USB CDC On Boot: Enabled"
+//      para o Monitor Serial funcionar (115200, "Nova linha").
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+// ===================== CONFIGURACAO =====================
+#define N  8                                         // tamanho do campo (maximo 9)
+#define NB 3                                         // quantidade de barcos (maximo 9)
+const int TAM[NB + 1] = {0, 2, 2, 4};                // tamanho de cada barco (o 0 NAO e barco)
+#define NOME_HOST    "BatalhaNaval_GRUPOX"           // combinar com o outro grupo (nome unico!)
+#define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"   // mesmos UUIDs da aula
+#define CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
+// simbolos (troque aqui como quiser)
+#define S_DESCONHECIDO '.'                           // posicao ainda nao atacada
+#define S_AGUA         'o'                           // tiro na agua
+#define S_ACERTO       'X'                           // tiro que acertou um barco
+#define S_BARCO        '#'                           // seu barco
+// ========================================================
+
+#define SEPARADOR "\n=====================================================\n"
+
+int resta[NB + 1];
+char meu[N][N], ini[N][N];                           // '~' agua | '1'-'9' barco | 'X' acerto | 'o' erro (interno)
+String ultimo = "";                                  // ultima jogada (mostrada no painel)
+String aviso  = "";                                  // mensagem de erro de entrada
+
+// ---------------- BLE: buffer de recepcao ----------------
+#define RXSZ 256
+volatile char rx[RXSZ];
+volatile int rxH = 0, rxT = 0;
+
+void rxPush(const uint8_t *d, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    int nx = (rxH + 1) % RXSZ;
+    if (nx == rxT) break;
+    rx[rxH] = d[i]; rxH = nx;
+  }
+}
+
+bool souHost = false;
+volatile bool conectado = false;
+BLECharacteristic *pChar = nullptr;                  // usado pelo HOST
+BLERemoteCharacteristic *rChar = nullptr;            // usado pelo CLIENTE
+BLEAdvertisedDevice *alvo = nullptr;
+volatile bool achou = false;
+
+// HOST: eventos de conexao e de escrita
+class SrvCB : public BLEServerCallbacks {
+  void onConnect(BLEServer *s)    { conectado = true; }
+  void onDisconnect(BLEServer *s) { conectado = false; }
+};
+class CharCB : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *c) {
+    auto v = c->getValue();
+    rxPush((const uint8_t *)v.c_str(), v.length());
+  }
+};
+
+// CLIENTE: procura o host pelo nome e recebe notificacoes
+class AdvCB : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice d) {
+    if (String(d.getName().c_str()) == NOME_HOST) {
+      BLEDevice::getScan()->stop();
+      alvo = new BLEAdvertisedDevice(d);
+      achou = true;
+    }
+  }
+};
+void notifyCB(BLERemoteCharacteristic *c, uint8_t *data, size_t len, bool isNotify) {
+  rxPush(data, len);
+}
+
+// ---------------- leitura / envio ----------------
+String lerSerial() {
+  String r = "";
+  while (!r.length()) { r = Serial.readStringUntil('\n'); r.trim(); }
+  return r;
+}
+
+String lerBT() {
+  String r = "";
+  while (true) {
+    while (rxT != rxH) {
+      char c = rx[rxT]; rxT = (rxT + 1) % RXSZ;
+      if (c == '\n') { r.trim(); if (r.length()) return r; r = ""; }
+      else r += c;
+    }
+    delay(5);
+  }
+}
+
+void enviar(String s) {
+  s += "\n";
+  if (souHost) { pChar->setValue((uint8_t *)s.c_str(), s.length()); pChar->notify(); }
+  else         { rChar->writeValue((uint8_t *)s.c_str(), s.length(), true); }
+}
+
+// ---------------- interface ----------------
+void celula(char x) {                                // desenha uma celula (2 caracteres)
+  char s;
+  if      (x == '~') s = S_DESCONHECIDO;
+  else if (x == 'o') s = S_AGUA;
+  else if (x == 'X') s = S_ACERTO;
+  else               s = S_BARCO;                    // para ver o numero do barco: s = x;
+  Serial.print(s);
+  Serial.print(' ');
+}
+
+void cabecalhoColunas() {
+  Serial.print("   ");
+  for (int c = 0; c < N; c++) { Serial.print((char)('A' + c)); Serial.print(' '); }
+}
+
+void legenda() {
+  Serial.printf("\nLegenda: %c=barco  %c=acerto  %c=agua  %c=nao atacado\n",
+                S_BARCO, S_ACERTO, S_AGUA, S_DESCONHECIDO);
+}
+
+void mostrar(char m[N][N]) {                         // um campo so (usado ao posicionar)
+  Serial.print(SEPARADOR);
+  Serial.println("  === POSICIONE SEUS BARCOS ===\n");
+  cabecalhoColunas();
+  for (int l = 0; l < N; l++) {
+    Serial.printf("\n%d  ", l + 1);
+    for (int c = 0; c < N; c++) celula(m[l][c]);
+  }
+  Serial.println();
+  legenda();
+  if (aviso.length()) { Serial.println(aviso); aviso = ""; }
+}
+
+void mostrarAmbos() {                                // os dois campos lado a lado
+  Serial.print(SEPARADOR);
+  Serial.println("  === BATALHA NAVAL ===\n");
+  Serial.print("    SEU CAMPO");
+  for (int i = 0; i < 2 * N - 6; i++) Serial.print(' ');
+  Serial.println("      CAMPO INIMIGO");
+  cabecalhoColunas();
+  Serial.print("      ");
+  cabecalhoColunas();
+  for (int l = 0; l < N; l++) {
+    Serial.printf("\n%d  ", l + 1);
+    for (int c = 0; c < N; c++) celula(meu[l][c]);
+    Serial.printf("    %d  ", l + 1);
+    for (int c = 0; c < N; c++) celula(ini[l][c]);
+  }
+  Serial.println();
+  legenda();
+  if (ultimo.length()) Serial.println("\n" + ultimo);
+  if (aviso.length())  { Serial.println(aviso); aviso = ""; }
+}
+
+
+// ---------------- jogo ----------------
+bool pos(String s, int &l, int &c) {                 // "E6" -> coluna 4, linha 5
+  s.toUpperCase();
+  c = s[0] - 'A'; l = s[1] - '1';
+  return s.length() == 2 && l >= 0 && l < N && c >= 0 && c < N;
+}
+
+void posicionar() {
+  for (int id = 1; id <= NB; id++) while (true) {
+    mostrar(meu);
+    Serial.printf("\nBarco %d (tamanho %d) - posicao e direcao (ex: A1 H ou E6 V): ", id, TAM[id]);
+    String s = lerSerial(); s.toUpperCase(); Serial.println(s);
+    int l, c; char d = s[3];
+    if (s.length() != 4 || !pos(s.substring(0, 2), l, c) || (d != 'H' && d != 'V')) {
+      aviso = "Entrada invalida!"; continue;
+    }
+    int dl = (d == 'V'), dc = (d == 'H');
+    bool ok = l + dl * (TAM[id] - 1) < N && c + dc * (TAM[id] - 1) < N;
+    for (int i = 0; ok && i < TAM[id]; i++) ok = meu[l + dl * i][c + dc * i] == '~';
+    if (!ok) { aviso = "Nao cabe ou ja tem barco ai!"; continue; }
+    for (int i = 0; i < TAM[id]; i++) meu[l + dl * i][c + dc * i] = '0' + id;
+    break;
+  }
+  mostrar(meu);
+}
+
+String receber(int l, int c) {                       // processa tiro recebido
+  char &x = meu[l][c];
+  if (x == 'X') return "ACERTO";
+  if (x == 'o' || x == '~') { x = 'o'; return "AGUA"; }
+  int id = x - '0'; x = 'X';
+  if (--resta[id] > 0) return "ACERTO";
+  int vivas = 0;
+  for (int i = 1; i <= NB; i++) vivas += resta[i];
+  return vivas == 0 ? "FIM" : "AFUNDOU";
+}
+
+void jogar(bool minhaVez) {
+  while (true) {
+    int l, c; String p, r;
+    mostrarAmbos();
+    if (minhaVez) {
+      while (true) {
+        Serial.print("\nSeu tiro (ex: E6): ");
+        p = lerSerial(); p.toUpperCase(); Serial.println(p);
+        if (pos(p, l, c) && ini[l][c] == '~') break;
+        Serial.println("Posicao invalida ou repetida!");
+      }
+      enviar("TIRO:" + p);
+      while (!(r = lerBT()).startsWith("RESP:"));
+      r = r.substring(5);
+      ini[l][c] = (r == "AGUA") ? 'o' : 'X';
+      ultimo = "Voce atirou em " + p + ": " + r;
+      if (r == "FIM") {
+        mostrarAmbos();
+        Serial.println("\n*** VOCE VENCEU! ***");
+        return;
+      }
+    } else {
+      Serial.println("\nVez do adversario...");
+      while (true) { p = lerBT(); if (p.startsWith("TIRO:") && pos(p.substring(5), l, c)) break; }
+      r = receber(l, c);
+      enviar("RESP:" + r);
+      ultimo = "Adversario atirou em " + p.substring(5) + ": " + r;
+      if (r == "FIM") {
+        mostrarAmbos();
+        Serial.println("\n*** VOCE PERDEU! ***");
+        return;
+      }
+    }
+    minhaVez = !minhaVez;
+  }
+}
+
+// ---------------- conexao BLE ----------------
+void conectar() {
+  Serial.println("=== BATALHA NAVAL (ESP32-C3 + BLE) ===");
+  Serial.println("Digite 1 para ser HOST (atira primeiro) ou 2 para CLIENTE:");
+  String op; while ((op = lerSerial()) != "1" && op != "2");
+  souHost = (op == "1");
+
+  if (souHost) {
+    BLEDevice::init(NOME_HOST);
+    BLEServer *srv = BLEDevice::createServer();
+    srv->setCallbacks(new SrvCB());
+    BLEService *svc = srv->createService(SERVICE_UUID);
+    pChar = svc->createCharacteristic(CHAR_UUID,
+              BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR |
+              BLECharacteristic::PROPERTY_NOTIFY);
+    pChar->addDescriptor(new BLE2902());
+    pChar->setCallbacks(new CharCB());
+    svc->start();
+    BLEAdvertising *adv = BLEDevice::getAdvertising();
+    adv->addServiceUUID(SERVICE_UUID);
+    adv->setScanResponse(true);
+    BLEDevice::startAdvertising();
+    Serial.println("Aguardando o adversario conectar...");
+    while (!conectado) delay(200);
+  } else {
+    BLEDevice::init("BN_CLIENTE");
+    BLEScan *scan = BLEDevice::getScan();
+    scan->setAdvertisedDeviceCallbacks(new AdvCB());
+    scan->setActiveScan(true);
+    Serial.println("Procurando o HOST...");
+    while (!achou) { scan->start(5, false); scan->clearResults(); }
+    BLEClient *cli = BLEDevice::createClient();
+    while (!cli->connect(alvo)) { Serial.println("Tentando conectar de novo..."); delay(1000); }
+    BLERemoteService *svc = cli->getService(SERVICE_UUID);
+    rChar = svc->getCharacteristic(CHAR_UUID);
+    rChar->registerForNotify(notifyCB);
+    conectado = true;
+  }
+  Serial.println("CONECTADO!");
+  delay(800);
+}
+
+void setup() {
+  Serial.begin(115200);
+  memset(meu, '~', sizeof meu);
+  memset(ini, '~', sizeof ini);
+  for (int i = 0; i <= NB; i++) resta[i] = TAM[i];
+
+  conectar();
+  posicionar();
+  enviar("READY");
+  Serial.println("\nAguardando o adversario posicionar os barcos...");
+  while (lerBT() != "READY");
+
+  jogar(souHost);
+  Serial.println("Fim de jogo. Aperte RESET para jogar de novo.");
+}
+
+void loop() {}
